@@ -1,0 +1,29 @@
+{
+  "chain": "Carso Diligence Lookback Chain",
+  "seq": 36,
+  "date": "2026-10-25",
+  "prev_root": "bd02f9b1e4fa0e1d19dd2da4b5c367462c571f6783bfdcb1796b8bf794f48c49",
+  "merkle_root": "95937129728392e250c77c12498c5f2634f60e0f8187bfc5ac361e9439848f13",
+  "leaf_count": 1,
+  "hash_alg": "sha256",
+  "merkle_rule": "rfc6962-v2",
+  "root_key_id": "diligence-chain-root-2026-09",
+  "root_signature": "4aVHXRgcuDAZAs2kdLLj9JDP2vdfnkzKwo+ZZQ5uMq1bvgbaMj8gZjzeLu5MXqPZwxRTRM199XghxcZoaDnQBA==",
+  "timestamps": [
+    {
+      "tsa": "freetsa",
+      "token": "root.freetsa.tsr"
+    },
+    {
+      "tsa": "digicert",
+      "token": "root.digicert.tsr"
+    }
+  ],
+  "leaves": [
+    {
+      "type": "source-snapshot",
+      "hash": "95937129728392e250c77c12498c5f2634f60e0f8187bfc5ac361e9439848f13",
+      "proof": []
+    }
+  ]
+}
