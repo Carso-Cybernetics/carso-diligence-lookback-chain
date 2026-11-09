@@ -1,0 +1,128 @@
+name: gate2-merge-daily-roots
+# GATE 2 (Marlowe's merge, automated). The daily bot pushes daily/<date> branches; this workflow re-runs
+# the full integrity gate and, only if every check passes, merges each unmerged day into main (in date order)
+# via a zero-approval PR. Any failure merges nothing further and fails the run (visible + notifiable).
+on:
+  push:
+    branches: ["daily/**"]
+  schedule:
+    - cron: "15 6 * * *"   # 06:15 UTC daily sweep (after the 05:00 UTC bot), catches any missed day
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Verify only — do not open/merge PRs"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: gate2-merge
+  cancel-in-progress: false
+
+jobs:
+  gate2:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main (full history)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Fetch daily branches
+        run: git fetch origin '+refs/heads/daily/*:refs/remotes/origin/daily/*'
+
+      - name: Verify integrity and build ordered merge list
+        id: verify
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess, base64, tempfile
+          def sh(*a): return subprocess.check_output(a)
+          def show(ref):
+              return json.loads(sh("git","show",ref))
+          hex64 = re.compile(r'^[0-9a-f]{64}$')
+          TOP = {"chain","seq","date","prev_root","merkle_root","leaf_count","hash_alg",
+                 "merkle_rule","root_key_id","root_signature","timestamps","leaves"}
+          SS = {"type","hash","proof"}
+          CDR = {"type","report_id","pdf_sha256","json_sha256","evidence_bundle_sha256","signature","key_id","proof"}
+          pub = "keys/diligence-chain-root-2026-09.pub.pem"
+          assert os.path.exists(pub), "public key missing in repo"
+
+          # branches on origin, day dirs already on main
+          branches = sh("git","branch","-r").decode().split()
+          daily = sorted(b for b in branches if re.fullmatch(r'origin/daily/\d{4}-\d{2}-\d{2}', b))
+          on_main = set(d for d in os.listdir("days")) if os.path.isdir("days") else set()
+
+          # prior = latest day currently on main
+          prior = sorted(on_main)[-1]
+          prj = json.load(open(f"days/{prior}/root.json"))
+          prev_seq, prev_root = prj["seq"], prj["merkle_root"]
+
+          to_merge, problems = [], []
+          for b in daily:
+              d = b.split("/")[-1]
+              if d in on_main:
+                  continue
+              r = show(f"{b}:days/{d}/root.json")
+              errs = []
+              if set(r) - TOP: errs.append(f"stray top keys {set(r)-TOP}")
+              if r.get("seq") != prev_seq + 1: errs.append(f"seq {r.get('seq')}!={prev_seq+1}")
+              if r.get("prev_root") != prev_root: errs.append("prev_root mismatch")
+              if r.get("date") != d: errs.append(f"date {r.get('date')}!={d}")
+              if not hex64.match(r.get("merkle_root","")): errs.append("merkle_root not 64-hex")
+              for lf in r.get("leaves", []):
+                  t = lf.get("type")
+                  if t == "source-snapshot":
+                      if set(lf) - SS or not hex64.match(lf.get("hash","")): errs.append("bad source-snapshot leaf")
+                  elif t == "cdr":
+                      if set(lf) - CDR: errs.append("bad cdr leaf keys")
+                  else:
+                      errs.append(f"unknown leaf type {t}")
+              # Ed25519 signature over the raw 32-byte merkle_root
+              with tempfile.TemporaryDirectory() as td:
+                  open(f"{td}/msg","wb").write(bytes.fromhex(r["merkle_root"]))
+                  open(f"{td}/sig","wb").write(base64.b64decode(r["root_signature"]))
+                  rc = subprocess.run(["openssl","pkeyutl","-verify","-pubin","-inkey",pub,
+                                       "-rawin","-in",f"{td}/msg","-sigfile",f"{td}/sig"],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+                  if rc != 0: errs.append("bad signature")
+              if errs:
+                  problems.append(f"{d}: {'; '.join(errs)}")
+                  break  # stop at first bad day; never merge past a gap/failure
+              to_merge.append(d)
+              prev_seq, prev_root = r["seq"], r["merkle_root"]
+
+          gh = os.environ["GITHUB_OUTPUT"]
+          with open(gh,"a") as f:
+              f.write(f"merge_dates={' '.join(to_merge)}\n")
+              f.write(f"problems={' | '.join(problems)}\n")
+          print("to merge:", to_merge or "(none)")
+          if problems:
+              print("PROBLEMS:", problems)
+              raise SystemExit(1)
+          PY
+
+      - name: Open + merge zero-approval PRs (in date order)
+        if: ${{ steps.verify.outputs.merge_dates != '' && github.event.inputs.dry_run != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          for d in ${{ steps.verify.outputs.merge_dates }}; do
+            echo "::group::merge daily root $d"
+            gh pr create --base main --head "daily/$d" \
+              --title "merge daily root $d" \
+              --body "Automated gate-2 merge — integrity checks (chain link, seq, date, Ed25519 signature, leaf-opacity) passed." \
+              || echo "PR may already exist for daily/$d"
+            gh pr merge "daily/$d" --merge --subject "merge daily root $d" --delete-branch=false
+            echo "::endgroup::"
+          done
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "merge_dates: ${{ steps.verify.outputs.merge_dates }}"
+          echo "problems: ${{ steps.verify.outputs.problems }}"
